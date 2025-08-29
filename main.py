@@ -1,3 +1,4 @@
+from functools import wraps
 import json
 import os
 from typing import List
@@ -67,6 +68,7 @@ def calculate_diff(old_content, new_content):
 
 
 def modifies_canvas(func):
+    @wraps(func)
     def wrapper(self, *args, **kwargs):
         old_content = self.canvas_data.content
         result = func(self, *args, **kwargs)
@@ -86,11 +88,14 @@ class CanvasData(BaseModel):
 
 class CanvasLLM:
     client: OpenAI
-    api_key: str
     canvas_data: CanvasData
 
-    def __init__(self, api_key: str, canvas_content: str):
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, canvas_content: str = "", client: OpenAI | None = None):
+        self.client = (
+            OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+            if client is None
+            else client
+        )
         self.canvas_data = CanvasData(content=canvas_content, changes=[])
 
     def invoke(self, messages):
@@ -106,6 +111,7 @@ class CanvasLLM:
             ],
         )
         self.canvas_data.content = response.choices[0].message.content
+        return self.canvas_data.content
 
     @modifies_canvas
     def apply_edits(self, edits: List[LLMEdit]):
@@ -123,10 +129,10 @@ class CanvasLLM:
             )
 
     def edit_canvas_numbered(self, instructions):
-        prepaired_canvas_content = self.canvas_data.content
+        numbered_canvas_content = self.canvas_data.content
 
-        prepaired_canvas_content = "\n".join(
-            [f"{i+1}: {x}" for i, x in enumerate(prepaired_canvas_content.split("\n"))]
+        numbered_canvas_content = "\n".join(
+            [f"{i+1}: {x}" for i, x in enumerate(numbered_canvas_content.split("\n"))]
         )
 
         response = self.invoke(
@@ -142,7 +148,7 @@ Instructions from the user for editing the content:
 
 You have to edit the following 1 based numbered lines of canvas content:
 <canvas_content>
-{prepaired_canvas_content}
+{numbered_canvas_content}
 </canvas_content>
 
 Reply with the edits that you would like to make to the canvas content. Reply in JSON in the following format:
@@ -173,11 +179,37 @@ Do not include any additional context or explanations, only the json.
 
         return self.apply_edits([LLMEdit(**edit) for edit in json_string["edits"]])
 
-    def chat(self, messages: list[dict]) -> dict:
-        response = self.client.chat.completions.create(
-            model="gpt-4o", messages=messages
+    @modifies_canvas
+    def edit_canvas_rewrite(self, instructions):
+        response = self.invoke(
+            [
+                {
+                    "role": "user",
+                    "content": f"""You are a canvas editing app. You will be given instructions by the user, return ONLY the content that the user requested and no other information. 
+
+Instructions from the user for editing the content:
+<instructions>
+{instructions}
+</instructions>
+
+You have to edit the following lines of canvas content:
+<canvas_content>
+{self.canvas_data.content}
+</canvas_content>
+
+Reply with the new content of the canvas. Change only what is necessary to fulfill the user's instructions.
+Do not include any additional context or explanations, only the new content. Wrap the content in <canvas_content> tags.
+""",
+                }
+            ],
         )
-        return response.choices[0].message
+
+        self.canvas_data.content = (
+            response.choices[0]
+            .message.content.strip("<canvas_content>\n")
+            .strip("\n</canvas_content>")
+        )
+        return self.canvas_data.content
 
 
 def print_canvas_with_changes(canvas: CanvasData):
@@ -192,7 +224,7 @@ def print_canvas_with_changes(canvas: CanvasData):
 
 
 if __name__ == "__main__":
-    canvas = CanvasLLM(api_key=os.environ.get("OPENAI_API_KEY"), canvas_content="")
+    canvas = CanvasLLM()
 
     canvas.generate_canvas(input("Instructions to generate the initial content:\n> "))
     print_canvas_with_changes(canvas.canvas_data)
